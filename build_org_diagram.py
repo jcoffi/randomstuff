@@ -12,11 +12,12 @@ Pipeline:
 
 You supply nothing: repos, accounts, and names are all discovered.
   - which account a repo belongs to: its S3 backend key matched to a state file
-    under ~/tfstates/<accountnumber>/ (account = the directory the state is in)
-  - when a repo resolves to several accounts, each resource is attributed by the
-    account embedded in its ARN (meta_data) if present, else duplicated
-  - a repo we can't match is never dropped: ARN-bearing resources still go to
-    their real account; the rest land in an explicit 'unresolved' container
+    under ~/tfstates/<accountnumber>/ (account = the directory the state is in,
+    the same directory-driven approach as tfgraph.py)
+  - every resource a repo produces is placed in that account (a genuine
+    multi-backend repo is drawn in each of its accounts)
+  - a repo whose backend key matches no state is kept under an explicit
+    'unresolved' container, never dropped
 
 Account names: the account containers are labelled using your AWS CLI config
 ($AWS_CONFIG_FILE if set, else ~/.aws/config).  Each profile name must END with
@@ -41,25 +42,19 @@ Skip the terravision step (already have per-repo jsons in a dir):
 Skip cross-account state layer:
     add --no-state
 """
-import argparse, json, os, re, shutil, subprocess, sys, threading, time, glob
+import argparse, json, os, re, subprocess, sys, glob
 from collections import defaultdict
 
 # ----------------------------------------------------------------------------
 # 1. terravision: run graphdata per repo
 # ----------------------------------------------------------------------------
-def run_terravision(terraform_root, workdir, timeout=0, heartbeat=20):
+def run_terravision(terraform_root, workdir):
     """
-    Run `terravision graphdata` per repo; return {repo: graph_json_path}.
-
-    terravision's own output is streamed live (it shells out to terraform, which
-    can sit on `init`/provider downloads for minutes), and a heartbeat line is
-    printed every `heartbeat` seconds so a slow run is visibly distinct from a
-    hang.  `timeout` (seconds, 0 = unlimited) kills a repo that overruns.
+    Run `terravision graphdata` per repo under ~/terraform/<repo>; return
+    {repo: json_path}.  terravision's output streams straight to the terminal so
+    you can watch terraform init/plan progress and confirm it works.  Kept
+    deliberately simple (a plain subprocess.run) — rework later if needed.
     """
-    if shutil.which("terravision") is None:
-        sys.exit("terravision CLI not found on PATH. Install it (e.g. "
-                 "'pip install terravision') or pass --graphdir <dir> with "
-                 "pre-generated per-repo JSON to skip this step.")
     os.makedirs(workdir, exist_ok=True)
     repos = [d for d in glob.glob(os.path.join(os.path.expanduser(terraform_root), "*"))
              if os.path.isdir(d)]
@@ -67,54 +62,12 @@ def run_terravision(terraform_root, workdir, timeout=0, heartbeat=20):
     for repo in sorted(repos):
         name = os.path.basename(repo.rstrip("/"))
         dst = os.path.join(workdir, f"{name}.json")
-        cmd = ["terravision", "graphdata", "--source", repo, "--outfile", dst]
-        tmo = f", timeout {timeout}s" if timeout else ""
-        print(f"[terravision] {name}: starting (runs terraform under the hood, "
-              f"can take a few min{tmo})...", file=sys.stderr, flush=True)
-        start = time.time()
-        try:
-            # inherit stdout/stderr -> terravision/terraform progress shows live
-            proc = subprocess.Popen(cmd)
-        except OSError as e:
-            sys.exit(
-                f"could not launch terravision ({e.__class__.__name__}: {e}).\n"
-                "  A bare-name exec failing with 'Not a directory' usually means "
-                "terravision's launcher shebang points at a missing interpreter "
-                "(e.g. a moved or removed venv/pipx env).\n"
-                "  Check:  head -1 \"$(command -v terravision)\"  and confirm that "
-                "interpreter path exists, then reinstall terravision.\n"
-                "  Or skip this step entirely with --graphdir <dir>."
-            )
-        stop_evt, killed = threading.Event(), threading.Event()
-
-        def _watch():
-            while not stop_evt.wait(heartbeat):
-                el = int(time.time() - start)
-                if timeout and el >= timeout:
-                    killed.set()
-                    proc.kill()
-                    return
-                print(f"  [terravision] {name}: still running ({el}s)...",
-                      file=sys.stderr, flush=True)
-
-        watcher = threading.Thread(target=_watch, daemon=True)
-        watcher.start()
-        try:
-            proc.wait()
-        finally:
-            stop_evt.set()
-            watcher.join(timeout=1)
-        el = int(time.time() - start)
-
-        if killed.is_set():
-            print(f"  [terravision] {name}: TIMEOUT after {el}s (killed); raise "
-                  f"--terravision-timeout if the repo is just slow.", file=sys.stderr)
+        print(f"[terravision] {name} ...", file=sys.stderr, flush=True)
+        r = subprocess.run(["terravision", "graphdata",
+                            "--source", repo, "--outfile", dst])
+        if r.returncode != 0 or not os.path.exists(dst):
+            print(f"  SKIP {name} (exit {r.returncode})", file=sys.stderr)
             continue
-        if proc.returncode != 0 or not os.path.exists(dst):
-            print(f"  [terravision] {name}: FAILED (exit {proc.returncode}, {el}s)",
-                  file=sys.stderr)
-            continue
-        print(f"  [terravision] {name}: done ({el}s)", file=sys.stderr)
         out[name] = dst
     return out
 
@@ -196,10 +149,9 @@ def load_account_names(path=AWS_CONFIG_PATH):
 # ----------------------------------------------------------------------------
 # 2. repo -> account attribution  (derived; no manual map)
 # ----------------------------------------------------------------------------
-ARN_ACCOUNT = re.compile(r"arn:aws[a-z\-]*:[^:]*:[^:]*:(\d{12}):")
 BACKEND_S3  = re.compile(r'backend\s+"s3"\s*\{(.*?)\}', re.DOTALL)
 BACKEND_KEY = re.compile(r'key\s*=\s*"([^"]+)"')
-UNRESOLVED  = "unresolved"   # sentinel account for repos with no state/ARN match
+UNRESOLVED  = "unresolved"   # cluster for repos whose backend key matched no state
 
 def _state_basename_index(tfstates_root):
     """{state_file_basename: set(account_numbers)} from ~/tfstates/<acct>/*.tfstate."""
@@ -225,9 +177,8 @@ def derive_repo_accounts(terraform_root, tfstates_root):
     key's basename to a state file under ~/tfstates/<accountnumber>/.  The
     account is the directory the matching state file lives in.
 
-    Returns {repo: [account_number, ...]}.  A repo may resolve to several
-    accounts (multiple backends, or a shared state filename); per-resource ARNs
-    disambiguate later in merge().
+    Returns {repo: [account_number, ...]} -- normally one account; >1 only for a
+    genuine multi-backend repo (or a state filename shared across accounts).
     """
     state_index = _state_basename_index(tfstates_root)
     repo_map = {}
@@ -250,62 +201,33 @@ def derive_repo_accounts(terraform_root, tfstates_root):
             repo_map[repo] = sorted(accts)
     return repo_map
 
-def account_for_resource(addr, meta, repo_accounts):
-    """Pick the account for one resource. Prefer ARN in metadata; else the
-    repo's single mapped account; else None (caller duplicates across all)."""
-    if isinstance(meta, dict):
-        for v in meta.values():
-            if isinstance(v, str):
-                m = ARN_ACCOUNT.search(v)
-                if m:
-                    return m.group(1)
-    if len(repo_accounts) == 1:
-        return repo_accounts[0]
-    return None  # ambiguous -> duplicate across mapped accounts
-
-
 # ----------------------------------------------------------------------------
 # 3. merge into one account-grouped graph
 # ----------------------------------------------------------------------------
 def merge(graphdicts, repo_map):
     """
-    Returns:
-      nodes: {global_id: {"label","type","account"}}
-      edges: list of (src_global_id, dst_global_id)
-    global_id = "<account>/<repo>/<address>" to keep accounts/repos disjoint.
+    Combine the per-repo terravision graphs into one account-grouped graph.
+
+    Account assignment is directory-driven, the tfgraph.py way: a repo's S3
+    backend points at exactly one state directory (~/tfstates/<account>/), so
+    every resource that repo produces is placed in that account -- no per-resource
+    ARN guessing.  A repo with no backend-key match is kept under the 'unresolved'
+    cluster, never dropped.  global_id = "<account>/<repo>/<address>".
     """
     nodes, edges = {}, []
-    for repo, (gd, md) in graphdicts.items():
-        mapped = repo_map.get(repo)
-        if mapped:
-            repo_accounts = mapped if isinstance(mapped, list) else [mapped]
-        else:
-            # Don't drop the repo: ARN-bearing resources still land in their real
-            # account; only ARN-less ones fall back to the 'unresolved' container.
-            print(f"  WARN repo '{repo}' not matched to an account; ARN-less "
-                  f"resources go under '{UNRESOLVED}'", file=sys.stderr)
-            repo_accounts = [UNRESOLVED]
-
-        # decide account per address
-        addr_acct = {}
-        for addr in gd:
-            acct = account_for_resource(addr, md.get(addr, {}), repo_accounts)
-            addr_acct[addr] = [acct] if acct else repo_accounts  # duplicate if ambiguous
-
-        def gid(addr, acct):
-            return f"{acct}/{repo}/{addr}"
-
-        for addr, conns in gd.items():
-            for acct in addr_acct[addr]:
-                g = gid(addr, acct)
+    for repo, (gd, _md) in graphdicts.items():
+        accts = repo_map.get(repo) or [UNRESOLVED]
+        if accts == [UNRESOLVED]:
+            print(f"  WARN repo '{repo}' not matched to an account; placing under "
+                  f"'{UNRESOLVED}'", file=sys.stderr)
+        for acct in accts:   # normally one; >1 only for a genuine multi-backend repo
+            for addr, conns in gd.items():
+                g = f"{acct}/{repo}/{addr}"
                 if g not in nodes:
-                    rtype = addr.split(".")[0]
-                    nodes[g] = {"label": addr, "type": rtype, "account": acct}
+                    nodes[g] = {"label": addr, "type": addr.split(".")[0],
+                                "account": acct}
                 for dst in conns:
-                    # connect within the same account attribution
-                    for dacct in addr_acct.get(dst, [acct]):
-                        if dacct == acct:
-                            edges.append((g, gid(dst, dacct)))
+                    edges.append((g, f"{acct}/{repo}/{dst}"))
     # keep only edges whose endpoints exist
     valid = set(nodes)
     edges = [(a, b) for a, b in edges if a in valid and b in valid]
@@ -535,8 +457,6 @@ def main():
     ap.add_argument("--tfstates-root", default="~/tfstates")
     ap.add_argument("--graphdir", help="dir of pre-generated per-repo json; skips terravision")
     ap.add_argument("--workdir", default="./_graphdata")
-    ap.add_argument("--terravision-timeout", type=int, default=0, metavar="SECONDS",
-                    help="per-repo timeout for terravision (0 = unlimited)")
     ap.add_argument("--no-state", action="store_true", help="skip cross-account edge layer")
     ap.add_argument("--out", default="org.vdx")
     args = ap.parse_args()
@@ -547,8 +467,7 @@ def main():
     if args.graphdir:
         graphdicts = load_graphdicts(args.graphdir)
     else:
-        paths = run_terravision(args.terraform_root, args.workdir,
-                                 args.terravision_timeout)
+        run_terravision(args.terraform_root, args.workdir)
         graphdicts = load_graphdicts(args.workdir)
     if not graphdicts:
         sys.exit("No graphdicts produced. Check terravision ran and emitted json.")
