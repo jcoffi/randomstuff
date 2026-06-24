@@ -115,6 +115,20 @@ def configure_git_auth():
           file=sys.stderr)
 
 
+def check_aws_login():
+    """Fail fast if the AWS session is invalid/expired.  One org sign-in
+    propagates to every account, so a single identity check is enough."""
+    try:
+        r = subprocess.run(["aws", "sts", "get-caller-identity"],
+                           capture_output=True, text=True)
+    except OSError as e:
+        sys.exit(f"aws CLI not found ({e}); cannot verify sign-in.")
+    if r.returncode != 0:
+        sys.exit("Not signed in to AWS (SSO session invalid/expired). "
+                 "Run 'aws sso login' and retry.\n" + r.stderr.strip())
+    print("[aws] signed in", file=sys.stderr)
+
+
 # ----------------------------------------------------------------------------
 # 1. terravision: run graphdata per repo
 # ----------------------------------------------------------------------------
@@ -125,6 +139,11 @@ def run_terravision(terraform_root, workdir, jobs=4):
     `terraform init/plan` (slow, mostly I/O-bound), so they overlap.  Output is
     inherited, not captured, so concurrent runs interleave on the terminal.
     """
+    # Share downloaded providers across terravision's per-repo temp TF_DATA_DIRs
+    # so terraform stops re-downloading the (large) AWS provider every run.
+    cache = os.environ.setdefault("TF_PLUGIN_CACHE_DIR",
+                                  os.path.expanduser("~/.terraform.d/plugin-cache"))
+    os.makedirs(cache, exist_ok=True)
     os.makedirs(workdir, exist_ok=True)
     repos = [d for d in glob.glob(os.path.join(os.path.expanduser(terraform_root), "*"))
              if os.path.isdir(d)]
@@ -555,6 +574,7 @@ def main():
     if args.graphdir:
         graphdicts = load_graphdicts(args.graphdir)
     else:
+        check_aws_login()
         run_terravision(args.terraform_root, args.workdir, args.jobs)
         graphdicts = load_graphdicts(args.workdir)
     if not graphdicts:
