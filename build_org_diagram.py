@@ -41,7 +41,7 @@ Skip the terravision step (already have per-repo jsons in a dir):
 Skip cross-account state layer:
     add --no-state
 """
-import argparse, json, os, re, subprocess, sys, glob
+import argparse, json, os, re, shutil, subprocess, sys, glob
 from collections import defaultdict
 
 # ----------------------------------------------------------------------------
@@ -49,6 +49,10 @@ from collections import defaultdict
 # ----------------------------------------------------------------------------
 def run_terravision(terraform_root, workdir):
     """Run `terravision graphdata` for each repo dir; return {repo: graph_json_path}."""
+    if shutil.which("terravision") is None:
+        sys.exit("terravision CLI not found on PATH. Install it (e.g. "
+                 "'pip install terravision') or pass --graphdir <dir> with "
+                 "pre-generated per-repo JSON to skip this step.")
     os.makedirs(workdir, exist_ok=True)
     repos = [d for d in glob.glob(os.path.join(os.path.expanduser(terraform_root), "*"))
              if os.path.isdir(d)]
@@ -58,7 +62,18 @@ def run_terravision(terraform_root, workdir):
         dst = os.path.join(workdir, f"{name}.json")
         cmd = ["terravision", "graphdata", "--source", repo, "--outfile", dst]
         print(f"[terravision] {name} ...", file=sys.stderr)
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True)
+        except OSError as e:
+            sys.exit(
+                f"could not launch terravision ({e.__class__.__name__}: {e}).\n"
+                "  A bare-name exec failing with 'Not a directory' usually means "
+                "terravision's launcher shebang points at a missing interpreter "
+                "(e.g. a moved or removed venv/pipx env).\n"
+                "  Check:  head -1 \"$(command -v terravision)\"  and confirm that "
+                "interpreter path exists, then reinstall terravision.\n"
+                "  Or skip this step entirely with --graphdir <dir>."
+            )
         if r.returncode != 0 or not os.path.exists(dst):
             print(f"  SKIP {name}: {r.stderr.strip()[:300]}", file=sys.stderr)
             continue
