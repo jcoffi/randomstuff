@@ -32,10 +32,8 @@ account number.
 
 Git auth (terravision clones git-sourced modules, e.g. from a private GitLab):
 put GIT_USERNAME, GIT_TOKEN, and GIT_HOST in a .env file (cwd or beside this
-script; stdlib loader, no python-dotenv).  Hosts are also auto-detected from
-https module `source` URLs in your .tf.  Creds are injected with no credential
-helper and no files via Git's own GIT_CONFIG_* env vars (needs Git >= 2.31), and
-GIT_TERMINAL_PROMPT=0 so a bad credential fails fast instead of prompting.
+script; stdlib loader, no python-dotenv).  Creds are injected with no credential
+helper and no files via Git's own GIT_CONFIG_* env vars (needs Git >= 2.31).
 
 Run:
     python3 build_org_diagram.py \
@@ -94,62 +92,27 @@ def load_dotenv(path=None):
           else "[env] no .env found (looked in cwd and script dir)", file=sys.stderr)
 
 
-MODULE_SRC = re.compile(r'source\s*=\s*"([^"]+)"')
-HTTPS_HOST = re.compile(r'https://(?:[^/@\s"]+@)?([^/\s"]+)/')
-
-def detect_git_hosts(terraform_root):
-    """Hosts of any https module `source = "..."` under ~/terraform (e.g. a
-    private GitLab), so clones to them get authenticated, not just github.com."""
-    hosts = set()
-    for tf in glob.glob(os.path.join(os.path.expanduser(terraform_root),
-                                     "**", "*.tf"), recursive=True):
-        try:
-            text = open(tf).read()
-        except Exception:
-            continue
-        for src in MODULE_SRC.findall(text):
-            m = HTTPS_HOST.search(src)
-            if m:
-                hosts.add(m.group(1))
-    return hosts
-
-def configure_git_auth(terraform_root="~/terraform"):
+def configure_git_auth():
     """
-    Make terravision's git clones (git-sourced modules, e.g. from a private
-    GitLab) authenticate using GIT_USERNAME + GIT_TOKEN -- no credential helper,
-    no files.
-
-    Hosts come from GIT_HOST plus any https module `source` URLs auto-detected in
-    your .tf, so a custom GitLab host is covered.  For each host we inject
-    `url.https://<creds>@host/.insteadOf https://host/` through Git's own
-    GIT_CONFIG_* env vars (Git >= 2.31), inherited by every child `git`.
-    GIT_TERMINAL_PROMPT is forced to 0 so a bad/missing credential fails fast
-    instead of hanging on a username prompt.  Only https:// is rewritten (SSH
-    remotes untouched).  No-op if GIT_TOKEN is unset.
+    Authenticate terravision's git module clones with GIT_USERNAME + GIT_TOKEN,
+    no credential helper and no files: inject `url.https://<creds>@<host>/.insteadOf
+    https://<host>/` via Git's own GIT_CONFIG_* env vars (Git >= 2.31).  Host is
+    GIT_HOST (default github.com).  No-op if GIT_TOKEN is unset.
     """
     from urllib.parse import quote
     token = os.environ.get("GIT_TOKEN")
     if not token:
-        print("[git] GIT_TOKEN not set -- git clones may prompt for credentials",
-              file=sys.stderr)
         return
     user = os.environ.get("GIT_USERNAME", "")
+    host = os.environ.get("GIT_HOST", "github.com")
     cred = (quote(user, safe="") + ":" + quote(token, safe="")) if user \
         else quote(token, safe="")
-    hosts = detect_git_hosts(terraform_root)
-    if os.environ.get("GIT_HOST"):
-        hosts.add(os.environ["GIT_HOST"])
-    if not hosts:
-        hosts.add("github.com")
     n = int(os.environ.get("GIT_CONFIG_COUNT", "0") or "0")
-    for host in sorted(hosts):
-        os.environ[f"GIT_CONFIG_KEY_{n}"]   = f"url.https://{cred}@{host}/.insteadOf"
-        os.environ[f"GIT_CONFIG_VALUE_{n}"] = f"https://{host}/"
-        n += 1
-    os.environ["GIT_CONFIG_COUNT"] = str(n)
-    os.environ.setdefault("GIT_TERMINAL_PROMPT", "0")  # fail fast, don't prompt
-    print(f"[git] auth configured as {user or '(token)'} for: "
-          f"{', '.join(sorted(hosts))}", file=sys.stderr)
+    os.environ[f"GIT_CONFIG_KEY_{n}"]   = f"url.https://{cred}@{host}/.insteadOf"
+    os.environ[f"GIT_CONFIG_VALUE_{n}"] = f"https://{host}/"
+    os.environ["GIT_CONFIG_COUNT"]      = str(n + 1)
+    print(f"[git] auth configured for https://{host}/ as {user or '(token)'}",
+          file=sys.stderr)
 
 
 # ----------------------------------------------------------------------------
@@ -577,14 +540,14 @@ def main():
     ap.add_argument("--tfstates-root", default="~/tfstates")
     ap.add_argument("--graphdir", help="dir of pre-generated per-repo json; skips terravision")
     ap.add_argument("--workdir", default="./_graphdata")
-    ap.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 4, metavar="N",
-                    help="parallel terravision runs (default: CPU count)")
+    ap.add_argument("-j", "--jobs", type=int, default=1, metavar="N",
+                    help="parallel terravision runs (default: 1 = serial)")
     ap.add_argument("--no-state", action="store_true", help="skip cross-account edge layer")
     ap.add_argument("--out", default="org.vdx")
     args = ap.parse_args()
 
-    load_dotenv()                            # GIT_USERNAME / GIT_TOKEN / GIT_HOST
-    configure_git_auth(args.terraform_root)  # wire creds into git for module clones
+    load_dotenv()          # GIT_USERNAME / GIT_TOKEN / GIT_HOST
+    configure_git_auth()   # wire creds into git for module clones
 
     repo_map = derive_repo_accounts(args.terraform_root, args.tfstates_root)
     print(f"repos resolved to accounts: {len(repo_map)}", file=sys.stderr)
