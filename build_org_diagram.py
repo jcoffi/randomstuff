@@ -42,33 +42,46 @@ Skip the terravision step (already have per-repo jsons in a dir):
 Skip cross-account state layer:
     add --no-state
 """
-import argparse, json, os, re, subprocess, sys, glob
+import argparse, concurrent.futures, json, os, re, subprocess, sys, glob
 from collections import defaultdict
 
 # ----------------------------------------------------------------------------
 # 1. terravision: run graphdata per repo
 # ----------------------------------------------------------------------------
-def run_terravision(terraform_root, workdir):
+def run_terravision(terraform_root, workdir, jobs=4):
     """
-    Run `terravision graphdata` per repo under ~/terraform/<repo>; return
-    {repo: json_path}.  terravision's output streams straight to the terminal so
-    you can watch terraform init/plan progress and confirm it works.  Kept
-    deliberately simple (a plain subprocess.run) — rework later if needed.
+    Run `terravision graphdata` for each repo under ~/terraform/<repo>, up to
+    `jobs` at a time, and return {repo: json_path}.  Each repo runs its own
+    `terraform init/plan` (slow, mostly I/O-bound), so they overlap.  Output is
+    inherited, not captured, so concurrent runs interleave on the terminal.
     """
     os.makedirs(workdir, exist_ok=True)
     repos = [d for d in glob.glob(os.path.join(os.path.expanduser(terraform_root), "*"))
              if os.path.isdir(d)]
-    out = {}
-    for repo in sorted(repos):
+
+    def _one(repo):
         name = os.path.basename(repo.rstrip("/"))
         dst = os.path.join(workdir, f"{name}.json")
-        print(f"[terravision] {name} ...", file=sys.stderr, flush=True)
-        r = subprocess.run(["terravision", "graphdata",
-                            "--source", repo, "--outfile", dst])
-        if r.returncode != 0 or not os.path.exists(dst):
-            print(f"  SKIP {name} (exit {r.returncode})", file=sys.stderr)
-            continue
-        out[name] = dst
+        print(f"[terravision] {name}: starting", file=sys.stderr, flush=True)
+        try:
+            rc = subprocess.run(["terravision", "graphdata",
+                                 "--source", repo, "--outfile", dst]).returncode
+        except OSError as e:
+            print(f"[terravision] {name}: could not launch terravision ({e})",
+                  file=sys.stderr, flush=True)
+            return name, dst, False
+        ok = rc == 0 and os.path.exists(dst)
+        print(f"[terravision] {name}: {'done' if ok else f'FAILED (exit {rc})'}",
+              file=sys.stderr, flush=True)
+        return name, dst, ok
+
+    out = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
+        for fut in concurrent.futures.as_completed(
+                ex.submit(_one, r) for r in sorted(repos)):
+            name, dst, ok = fut.result()
+            if ok:
+                out[name] = dst
     return out
 
 
@@ -457,6 +470,8 @@ def main():
     ap.add_argument("--tfstates-root", default="~/tfstates")
     ap.add_argument("--graphdir", help="dir of pre-generated per-repo json; skips terravision")
     ap.add_argument("--workdir", default="./_graphdata")
+    ap.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 4, metavar="N",
+                    help="parallel terravision runs (default: CPU count)")
     ap.add_argument("--no-state", action="store_true", help="skip cross-account edge layer")
     ap.add_argument("--out", default="org.vdx")
     args = ap.parse_args()
@@ -467,7 +482,7 @@ def main():
     if args.graphdir:
         graphdicts = load_graphdicts(args.graphdir)
     else:
-        run_terravision(args.terraform_root, args.workdir)
+        run_terravision(args.terraform_root, args.workdir, args.jobs)
         graphdicts = load_graphdicts(args.workdir)
     if not graphdicts:
         sys.exit("No graphdicts produced. Check terravision ran and emitted json.")
