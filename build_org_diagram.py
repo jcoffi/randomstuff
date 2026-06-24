@@ -11,6 +11,17 @@ Pipeline:
 
 You supply: a repo->account map (JSON).  Everything else is discovered.
 
+Account names: the account containers are labelled using your AWS CLI config
+($AWS_CONFIG_FILE if set, else ~/.aws/config).  Each profile name must END with
+the 12-digit account number, and the comment line directly beneath it holds the
+human account name, e.g.:
+
+    [profile myorg-prod-123456789012]
+    # Production
+
+If the config is absent (e.g. running off-box), labels fall back to the bare
+account number.
+
 Map format (repo_account_map.json):
     { "<reponame>": "<aws_account_number>", ... }
   If a repo deploys to several accounts, value may be a list:
@@ -71,6 +82,63 @@ def load_graphdicts(graphdir):
         except Exception as e:
             print(f"  bad json {p}: {e}", file=sys.stderr)
     return out
+
+
+# ----------------------------------------------------------------------------
+# 1b. AWS config: account number -> account name
+# ----------------------------------------------------------------------------
+AWS_CONFIG_PATH = os.environ.get("AWS_CONFIG_FILE") or "~/.aws/config"
+
+PROFILE_HDR   = re.compile(r"^\[(?:profile\s+)?(.+?)\]\s*$")
+TRAILING_ACCT = re.compile(r"(\d{12})\D*$")
+COMMENT_LABEL = re.compile(r"(?i)^(?:account[\s_]*name|account|name|alias)\s*[:=]\s*(.+)$")
+
+def _parse_comment_name(s):
+    """Strip the comment marker and any 'label:'/'label =' prefix; return name."""
+    s = s.lstrip("#;").strip()
+    if not s:
+        return None
+    m = COMMENT_LABEL.match(s)
+    return (m.group(1).strip() if m else s) or None
+
+def load_account_names(path=AWS_CONFIG_PATH):
+    """
+    Parse the AWS CLI config -> {account_number: account_name}.
+
+    The 12-digit account number is the trailing run of the profile name, and
+    the account name is the comment line directly beneath the profile header:
+
+        [profile myorg-prod-123456789012]
+        # Production
+
+    Tolerant to '[name]' or '[profile name]' headers, blank lines between the
+    header and its comment, and comment forms like '# Account Name: Production'
+    or '# name = Production'.  Returns {} (with a warning) if the file is absent.
+    """
+    names = {}
+    full = os.path.expanduser(path or "")
+    if not full or not os.path.exists(full):
+        if full:
+            print(f"  WARN aws config not found: {full}", file=sys.stderr)
+        return names
+    pending = None
+    with open(full) as fh:
+        for raw in fh:
+            s = raw.strip()
+            mh = PROFILE_HDR.match(s)
+            if mh:
+                ma = TRAILING_ACCT.search(mh.group(1))
+                pending = ma.group(1) if ma else None
+                continue
+            if pending:
+                if not s:
+                    continue  # allow blank line(s) between header and comment
+                if s.startswith("#") or s.startswith(";"):
+                    nm = _parse_comment_name(s)
+                    if nm:
+                        names[pending] = nm
+                pending = None  # only the first content line under the header counts
+    return names
 
 
 # ----------------------------------------------------------------------------
@@ -200,12 +268,15 @@ def esc(s):
     return (str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
             .replace('"',"&quot;"))
 
-def build_vdx(nodes, edges, xedges, out_path):
+def build_vdx(nodes, edges, xedges, out_path, acct_names=None):
     """
     Lay out: one container box per account; resource boxes gridded inside;
     intra-account connectors; cross-account connectors between containers.
     Geometry in inches. Single Page. No external stencil dependency.
+
+    acct_names: optional {account_number: account_name} for container labels.
     """
+    acct_names = acct_names or {}
     by_acct = defaultdict(list)
     for gid, n in nodes.items():
         by_acct[n["account"]].append((gid, n))
@@ -227,8 +298,10 @@ def build_vdx(nodes, edges, xedges, out_path):
         ay = row * (ACCT_H + PAD) + PAD
         cont_id = next_id()
         acct_anchor[acct] = (ax + ACCT_W/2, ay + ACCT_H/2)
-        # container shape (account)
-        shapes.append(container_shape(cont_id, f"AWS Account {acct}",
+        # container shape (account) — prefer human name from AWS config
+        nm = acct_names.get(acct)
+        acct_label = f"{nm} ({acct})" if nm else f"AWS Account {acct}"
+        shapes.append(container_shape(cont_id, acct_label,
                                       ax, ay, ACCT_W, ACCT_H))
         # grid resources inside
         items = by_acct[acct]
@@ -370,10 +443,18 @@ def main():
     print(f"accounts={len(accounts)} nodes={len(nodes)} intra_edges={len(edges)}",
           file=sys.stderr)
 
+    acct_names = load_account_names()
+    matched = sum(1 for a in accounts if a in acct_names)
+    print(f"account names: {len(acct_names)} parsed, {matched}/{len(accounts)} matched",
+          file=sys.stderr)
+    missing = [a for a in accounts if a not in acct_names]
+    if missing:
+        print("  no name for: " + ", ".join(missing), file=sys.stderr)
+
     xedges = [] if args.no_state else cross_account_edges(args.tfstates_root, accounts)
     print(f"cross_account_edges={len(xedges)}", file=sys.stderr)
 
-    build_vdx(nodes, edges, xedges, args.out)
+    build_vdx(nodes, edges, xedges, args.out, acct_names)
     print(f"wrote {args.out}", file=sys.stderr)
 
 
