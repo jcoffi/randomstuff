@@ -30,6 +30,12 @@ human account name, e.g.:
 If the config is absent (e.g. running off-box), labels fall back to the bare
 account number.
 
+Git auth (terravision clones git-sourced modules): put GIT_USERNAME and GIT_TOKEN
+in a .env file in the working directory (loaded automatically, stdlib only, no
+python-dotenv).  They are injected into git with no credential helper and no
+extra files, via Git's own GIT_CONFIG_* env vars (needs Git >= 2.31).  Override
+the host (default github.com) with GIT_HOST.
+
 Run:
     python3 build_org_diagram.py \
         --terraform-root ~/terraform \
@@ -44,6 +50,64 @@ Skip cross-account state layer:
 """
 import argparse, concurrent.futures, json, os, re, subprocess, sys, glob
 from collections import defaultdict
+
+
+# ----------------------------------------------------------------------------
+# 0. environment: load .env, wire git auth from GIT_USERNAME / GIT_TOKEN
+# ----------------------------------------------------------------------------
+def load_dotenv(path=".env"):
+    """
+    Minimal .env loader (stdlib only): KEY=VALUE per line; '#' comments and blank
+    lines ignored; optional leading 'export '; surrounding single/double quotes
+    stripped.  Existing environment variables are NOT overridden (real env wins).
+    """
+    p = os.path.expanduser(path)
+    if not os.path.exists(p):
+        return
+    with open(p) as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            key, sep, val = line.partition("=")
+            if not sep:
+                continue
+            key, val = key.strip(), val.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                val = val[1:-1]
+            if key and key not in os.environ:
+                os.environ[key] = val
+
+
+def configure_git_auth():
+    """
+    Make terravision's git clones (git-sourced modules) authenticate using
+    GIT_USERNAME + GIT_TOKEN, with no credential helper and no extra files.
+
+    Injects a `url.<creds>.insteadOf https://<host>/` rewrite through Git's own
+    GIT_CONFIG_COUNT/KEY/VALUE environment variables (Git >= 2.31), which every
+    child `git` process terravision spawns inherits.  Host defaults to github.com
+    (override with GIT_HOST).  No-op if GIT_TOKEN is unset.  Only https:// URLs
+    are rewritten, so SSH remotes are untouched.
+    """
+    from urllib.parse import quote
+    token = os.environ.get("GIT_TOKEN")
+    if not token:
+        return
+    user = os.environ.get("GIT_USERNAME", "")
+    host = os.environ.get("GIT_HOST", "github.com")
+    cred = quote(token, safe="")
+    if user:
+        cred = quote(user, safe="") + ":" + cred
+    n = int(os.environ.get("GIT_CONFIG_COUNT", "0") or "0")
+    os.environ[f"GIT_CONFIG_KEY_{n}"]   = f"url.https://{cred}@{host}/.insteadOf"
+    os.environ[f"GIT_CONFIG_VALUE_{n}"] = f"https://{host}/"
+    os.environ["GIT_CONFIG_COUNT"]      = str(n + 1)
+    print(f"[git] auth configured for https://{host}/ as {user or '(token)'}",
+          file=sys.stderr)
+
 
 # ----------------------------------------------------------------------------
 # 1. terravision: run graphdata per repo
@@ -475,6 +539,9 @@ def main():
     ap.add_argument("--no-state", action="store_true", help="skip cross-account edge layer")
     ap.add_argument("--out", default="org.vdx")
     args = ap.parse_args()
+
+    load_dotenv()          # GIT_USERNAME / GIT_TOKEN (and any others) from .env
+    configure_git_auth()   # wire them into git for terravision's module clones
 
     repo_map = derive_repo_accounts(args.terraform_root, args.tfstates_root)
     print(f"repos resolved to accounts: {len(repo_map)}", file=sys.stderr)
