@@ -15,6 +15,8 @@ You supply nothing: repos, accounts, and names are all discovered.
     under ~/tfstates/<accountnumber>/ (account = the directory the state is in)
   - when a repo resolves to several accounts, each resource is attributed by the
     account embedded in its ARN (meta_data) if present, else duplicated
+  - a repo we can't match is never dropped: ARN-bearing resources still go to
+    their real account; the rest land in an explicit 'unresolved' container
 
 Account names: the account containers are labelled using your AWS CLI config
 ($AWS_CONFIG_FILE if set, else ~/.aws/config).  Each profile name must END with
@@ -144,6 +146,7 @@ def load_account_names(path=AWS_CONFIG_PATH):
 ARN_ACCOUNT = re.compile(r"arn:aws[a-z\-]*:[^:]*:[^:]*:(\d{12}):")
 BACKEND_S3  = re.compile(r'backend\s+"s3"\s*\{(.*?)\}', re.DOTALL)
 BACKEND_KEY = re.compile(r'key\s*=\s*"([^"]+)"')
+UNRESOLVED  = "unresolved"   # sentinel account for repos with no state/ARN match
 
 def _state_basename_index(tfstates_root):
     """{state_file_basename: set(account_numbers)} from ~/tfstates/<acct>/*.tfstate."""
@@ -192,8 +195,6 @@ def derive_repo_accounts(terraform_root, tfstates_root):
                     accts |= state_index.get(os.path.basename(km.group(1)), set())
         if accts:
             repo_map[repo] = sorted(accts)
-        else:
-            print(f"  WARN no state match for repo '{repo}'", file=sys.stderr)
     return repo_map
 
 def account_for_resource(addr, meta, repo_accounts):
@@ -223,11 +224,14 @@ def merge(graphdicts, repo_map):
     nodes, edges = {}, []
     for repo, (gd, md) in graphdicts.items():
         mapped = repo_map.get(repo)
-        if not mapped:
-            print(f"  WARN repo '{repo}' has no resolved account; skipping",
-                  file=sys.stderr)
-            continue
-        repo_accounts = mapped if isinstance(mapped, list) else [mapped]
+        if mapped:
+            repo_accounts = mapped if isinstance(mapped, list) else [mapped]
+        else:
+            # Don't drop the repo: ARN-bearing resources still land in their real
+            # account; only ARN-less ones fall back to the 'unresolved' container.
+            print(f"  WARN repo '{repo}' not matched to an account; ARN-less "
+                  f"resources go under '{UNRESOLVED}'", file=sys.stderr)
+            repo_accounts = [UNRESOLVED]
 
         # decide account per address
         addr_acct = {}
@@ -351,7 +355,12 @@ def build_vdx(nodes, edges, xedges, out_path, acct_names=None):
         acct_anchor[acct] = (ax + ACCT_W/2, ay + ACCT_H/2)
         # container shape (account) — prefer human name from AWS config
         nm = acct_names.get(acct)
-        acct_label = f"{nm} ({acct})" if nm else f"AWS Account {acct}"
+        if acct == UNRESOLVED:
+            acct_label = "Unresolved (no state/ARN match)"
+        elif nm:
+            acct_label = f"{nm} ({acct})"
+        else:
+            acct_label = f"AWS Account {acct}"
         shapes.append(container_shape(cont_id, acct_label,
                                       ax, ay, ACCT_W, ACCT_H))
         # grid resources inside
@@ -497,7 +506,7 @@ def main():
     matched = sum(1 for a in accounts if a in acct_names)
     print(f"account names: {len(acct_names)} parsed, {matched}/{len(accounts)} matched",
           file=sys.stderr)
-    missing = [a for a in accounts if a not in acct_names]
+    missing = [a for a in accounts if a not in acct_names and a != UNRESOLVED]
     if missing:
         print("  no name for: " + ", ".join(missing), file=sys.stderr)
 
