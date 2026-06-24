@@ -41,14 +41,21 @@ Skip the terravision step (already have per-repo jsons in a dir):
 Skip cross-account state layer:
     add --no-state
 """
-import argparse, json, os, re, shutil, subprocess, sys, glob
+import argparse, json, os, re, shutil, subprocess, sys, threading, time, glob
 from collections import defaultdict
 
 # ----------------------------------------------------------------------------
 # 1. terravision: run graphdata per repo
 # ----------------------------------------------------------------------------
-def run_terravision(terraform_root, workdir):
-    """Run `terravision graphdata` for each repo dir; return {repo: graph_json_path}."""
+def run_terravision(terraform_root, workdir, timeout=0, heartbeat=20):
+    """
+    Run `terravision graphdata` per repo; return {repo: graph_json_path}.
+
+    terravision's own output is streamed live (it shells out to terraform, which
+    can sit on `init`/provider downloads for minutes), and a heartbeat line is
+    printed every `heartbeat` seconds so a slow run is visibly distinct from a
+    hang.  `timeout` (seconds, 0 = unlimited) kills a repo that overruns.
+    """
     if shutil.which("terravision") is None:
         sys.exit("terravision CLI not found on PATH. Install it (e.g. "
                  "'pip install terravision') or pass --graphdir <dir> with "
@@ -61,9 +68,13 @@ def run_terravision(terraform_root, workdir):
         name = os.path.basename(repo.rstrip("/"))
         dst = os.path.join(workdir, f"{name}.json")
         cmd = ["terravision", "graphdata", "--source", repo, "--outfile", dst]
-        print(f"[terravision] {name} ...", file=sys.stderr)
+        tmo = f", timeout {timeout}s" if timeout else ""
+        print(f"[terravision] {name}: starting (runs terraform under the hood, "
+              f"can take a few min{tmo})...", file=sys.stderr, flush=True)
+        start = time.time()
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True)
+            # inherit stdout/stderr -> terravision/terraform progress shows live
+            proc = subprocess.Popen(cmd)
         except OSError as e:
             sys.exit(
                 f"could not launch terravision ({e.__class__.__name__}: {e}).\n"
@@ -74,9 +85,36 @@ def run_terravision(terraform_root, workdir):
                 "interpreter path exists, then reinstall terravision.\n"
                 "  Or skip this step entirely with --graphdir <dir>."
             )
-        if r.returncode != 0 or not os.path.exists(dst):
-            print(f"  SKIP {name}: {r.stderr.strip()[:300]}", file=sys.stderr)
+        stop_evt, killed = threading.Event(), threading.Event()
+
+        def _watch():
+            while not stop_evt.wait(heartbeat):
+                el = int(time.time() - start)
+                if timeout and el >= timeout:
+                    killed.set()
+                    proc.kill()
+                    return
+                print(f"  [terravision] {name}: still running ({el}s)...",
+                      file=sys.stderr, flush=True)
+
+        watcher = threading.Thread(target=_watch, daemon=True)
+        watcher.start()
+        try:
+            proc.wait()
+        finally:
+            stop_evt.set()
+            watcher.join(timeout=1)
+        el = int(time.time() - start)
+
+        if killed.is_set():
+            print(f"  [terravision] {name}: TIMEOUT after {el}s (killed); raise "
+                  f"--terravision-timeout if the repo is just slow.", file=sys.stderr)
             continue
+        if proc.returncode != 0 or not os.path.exists(dst):
+            print(f"  [terravision] {name}: FAILED (exit {proc.returncode}, {el}s)",
+                  file=sys.stderr)
+            continue
+        print(f"  [terravision] {name}: done ({el}s)", file=sys.stderr)
         out[name] = dst
     return out
 
@@ -497,6 +535,8 @@ def main():
     ap.add_argument("--tfstates-root", default="~/tfstates")
     ap.add_argument("--graphdir", help="dir of pre-generated per-repo json; skips terravision")
     ap.add_argument("--workdir", default="./_graphdata")
+    ap.add_argument("--terravision-timeout", type=int, default=0, metavar="SECONDS",
+                    help="per-repo timeout for terravision (0 = unlimited)")
     ap.add_argument("--no-state", action="store_true", help="skip cross-account edge layer")
     ap.add_argument("--out", default="org.vdx")
     args = ap.parse_args()
@@ -507,7 +547,8 @@ def main():
     if args.graphdir:
         graphdicts = load_graphdicts(args.graphdir)
     else:
-        paths = run_terravision(args.terraform_root, args.workdir)
+        paths = run_terravision(args.terraform_root, args.workdir,
+                                 args.terravision_timeout)
         graphdicts = load_graphdicts(args.workdir)
     if not graphdicts:
         sys.exit("No graphdicts produced. Check terravision ran and emitted json.")
