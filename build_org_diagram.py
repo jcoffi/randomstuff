@@ -4,13 +4,17 @@ Org AWS diagram from Terraform, output as editable Visio .vdx (XML DatadiagramML
 
 Pipeline:
   1. Run `terravision graphdata` per repo under ~/terraform/<repo>  -> per-repo graphdict JSON
-  2. Attribute each repo's resources to an AWS account via your repo->account map
+  2. Attribute each repo's resources to an AWS account by matching the repo's
+     S3 backend key to a state file under ~/tfstates/<accountnumber>/
   3. Merge all repos into one graph, grouped into per-account containers
   4. Inject cross-account edges (peering / TGW / RAM) parsed from ~/tfstates/<account>
   5. Emit org.vdx  (open + edit in desktop Visio)
 
-You supply: only a repo->account-number map (JSON).  Account names are read
-from your AWS config (see below); everything else is discovered.
+You supply nothing: repos, accounts, and names are all discovered.
+  - which account a repo belongs to: its S3 backend key matched to a state file
+    under ~/tfstates/<accountnumber>/ (account = the directory the state is in)
+  - when a repo resolves to several accounts, each resource is attributed by the
+    account embedded in its ARN (meta_data) if present, else duplicated
 
 Account names: the account containers are labelled using your AWS CLI config
 ($AWS_CONFIG_FILE if set, else ~/.aws/config).  Each profile name must END with
@@ -23,22 +27,14 @@ human account name, e.g.:
 If the config is absent (e.g. running off-box), labels fall back to the bare
 account number.
 
-Map format (repo_account_map.json):
-    { "<reponame>": "<aws_account_number>", ... }
-  If a repo deploys to several accounts, value may be a list:
-    { "networking": ["111111111111","222222222222"], ... }
-  When a repo maps to multiple accounts, its resources are attributed by the
-  account embedded in each resource's ARN if present (meta_data), else duplicated.
-
 Run:
     python3 build_org_diagram.py \
         --terraform-root ~/terraform \
         --tfstates-root  ~/tfstates \
-        --map            repo_account_map.json \
         --out            org.vdx
 
 Skip the terravision step (already have per-repo jsons in a dir):
-    python3 build_org_diagram.py --graphdir ./graphjsons --tfstates-root ~/tfstates --map map.json --out org.vdx
+    python3 build_org_diagram.py --graphdir ./graphjsons --tfstates-root ~/tfstates --out org.vdx
 
 Skip cross-account state layer:
     add --no-state
@@ -143,9 +139,62 @@ def load_account_names(path=AWS_CONFIG_PATH):
 
 
 # ----------------------------------------------------------------------------
-# 2. repo -> account attribution
+# 2. repo -> account attribution  (derived; no manual map)
 # ----------------------------------------------------------------------------
 ARN_ACCOUNT = re.compile(r"arn:aws[a-z\-]*:[^:]*:[^:]*:(\d{12}):")
+BACKEND_S3  = re.compile(r'backend\s+"s3"\s*\{(.*?)\}', re.DOTALL)
+BACKEND_KEY = re.compile(r'key\s*=\s*"([^"]+)"')
+
+def _state_basename_index(tfstates_root):
+    """{state_file_basename: set(account_numbers)} from ~/tfstates/<acct>/*.tfstate."""
+    index = defaultdict(set)
+    root = os.path.expanduser(tfstates_root)
+    if not os.path.isdir(root):
+        print(f"  WARN tfstates root not found: {root}", file=sys.stderr)
+        return index
+    for acct in sorted(os.listdir(root)):
+        adir = os.path.join(root, acct)
+        if not os.path.isdir(adir):
+            continue
+        for sf in glob.glob(os.path.join(adir, "**", "*.tfstate"), recursive=True):
+            if sf.endswith(".backup"):
+                continue
+            index[os.path.basename(sf)].add(acct)
+    return index
+
+def derive_repo_accounts(terraform_root, tfstates_root):
+    """
+    Map each repo under ~/terraform/<repo> to its AWS account(s) with no manual
+    input: read the S3 backend `key` from the repo's .tf files, then match that
+    key's basename to a state file under ~/tfstates/<accountnumber>/.  The
+    account is the directory the matching state file lives in.
+
+    Returns {repo: [account_number, ...]}.  A repo may resolve to several
+    accounts (multiple backends, or a shared state filename); per-resource ARNs
+    disambiguate later in merge().
+    """
+    state_index = _state_basename_index(tfstates_root)
+    repo_map = {}
+    troot = os.path.expanduser(terraform_root)
+    for repo_dir in sorted(glob.glob(os.path.join(troot, "*"))):
+        if not os.path.isdir(repo_dir):
+            continue
+        repo = os.path.basename(repo_dir.rstrip("/"))
+        accts = set()
+        for tf in glob.glob(os.path.join(repo_dir, "**", "*.tf"), recursive=True):
+            try:
+                text = open(tf).read()
+            except Exception:
+                continue
+            for block in BACKEND_S3.findall(text):
+                km = BACKEND_KEY.search(block)
+                if km:
+                    accts |= state_index.get(os.path.basename(km.group(1)), set())
+        if accts:
+            repo_map[repo] = sorted(accts)
+        else:
+            print(f"  WARN no state match for repo '{repo}'", file=sys.stderr)
+    return repo_map
 
 def account_for_resource(addr, meta, repo_accounts):
     """Pick the account for one resource. Prefer ARN in metadata; else the
@@ -174,8 +223,9 @@ def merge(graphdicts, repo_map):
     nodes, edges = {}, []
     for repo, (gd, md) in graphdicts.items():
         mapped = repo_map.get(repo)
-        if mapped is None:
-            print(f"  WARN repo '{repo}' not in map; skipping", file=sys.stderr)
+        if not mapped:
+            print(f"  WARN repo '{repo}' has no resolved account; skipping",
+                  file=sys.stderr)
             continue
         repo_accounts = mapped if isinstance(mapped, list) else [mapped]
 
@@ -421,15 +471,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--terraform-root", default="~/terraform")
     ap.add_argument("--tfstates-root", default="~/tfstates")
-    ap.add_argument("--map", required=True, help="repo->account JSON")
     ap.add_argument("--graphdir", help="dir of pre-generated per-repo json; skips terravision")
     ap.add_argument("--workdir", default="./_graphdata")
     ap.add_argument("--no-state", action="store_true", help="skip cross-account edge layer")
     ap.add_argument("--out", default="org.vdx")
     args = ap.parse_args()
 
-    with open(args.map) as f:
-        repo_map = json.load(f)
+    repo_map = derive_repo_accounts(args.terraform_root, args.tfstates_root)
+    print(f"repos resolved to accounts: {len(repo_map)}", file=sys.stderr)
 
     if args.graphdir:
         graphdicts = load_graphdicts(args.graphdir)
