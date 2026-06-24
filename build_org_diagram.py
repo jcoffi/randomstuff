@@ -9,7 +9,8 @@ Pipeline:
   4. Inject cross-account edges (peering / TGW / RAM) parsed from ~/tfstates/<account>
   5. Emit org.vdx  (open + edit in desktop Visio)
 
-You supply: a repo->account map (JSON).  Everything else is discovered.
+You supply: only a repo->account-number map (JSON).  Account names are read
+from your AWS config (see below); everything else is discovered.
 
 Account names: the account containers are labelled using your AWS CLI config
 ($AWS_CONFIG_FILE if set, else ~/.aws/config).  Each profile name must END with
