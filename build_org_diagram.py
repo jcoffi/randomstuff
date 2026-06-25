@@ -96,15 +96,20 @@ def configure_git_auth():
     """
     Authenticate terravision's git module clones with GIT_USERNAME + GIT_TOKEN,
     no credential helper and no files: inject `url.https://<creds>@<host>/.insteadOf
-    https://<host>/` via Git's own GIT_CONFIG_* env vars (Git >= 2.31).  Host is
-    GIT_HOST (default github.com).  No-op if GIT_TOKEN is unset.
+    https://<host>/` via Git's own GIT_CONFIG_* env vars (Git >= 2.31).  Host
+    comes from GIT_HOST (required when GIT_TOKEN is set; no default).  No-op if
+    GIT_TOKEN is unset.
     """
     from urllib.parse import quote
     token = os.environ.get("GIT_TOKEN")
     if not token:
         return
     user = os.environ.get("GIT_USERNAME", "")
-    host = os.environ.get("GIT_HOST", "github.com")
+    host = os.environ.get("GIT_HOST")
+    if not host:
+        sys.exit("GIT_TOKEN is set but GIT_HOST is not. Set GIT_HOST (your git "
+                 "host, e.g. the GitLab server) in .env so clones authenticate "
+                 "to the right host.")
     cred = (quote(user, safe="") + ":" + quote(token, safe="")) if user \
         else quote(token, safe="")
     n = int(os.environ.get("GIT_CONFIG_COUNT", "0") or "0")
@@ -113,20 +118,6 @@ def configure_git_auth():
     os.environ["GIT_CONFIG_COUNT"]      = str(n + 1)
     print(f"[git] auth configured for https://{host}/ as {user or '(token)'}",
           file=sys.stderr)
-
-
-def check_aws_login():
-    """Fail fast if the AWS session is invalid/expired.  One org sign-in
-    propagates to every account, so a single identity check is enough."""
-    try:
-        r = subprocess.run(["aws", "sts", "get-caller-identity"],
-                           capture_output=True, text=True)
-    except OSError as e:
-        sys.exit(f"aws CLI not found ({e}); cannot verify sign-in.")
-    if r.returncode != 0:
-        sys.exit("Not signed in to AWS (SSO session invalid/expired). "
-                 "Run 'aws sso login' and retry.\n" + r.stderr.strip())
-    print("[aws] signed in", file=sys.stderr)
 
 
 # ----------------------------------------------------------------------------
@@ -574,7 +565,6 @@ def main():
     if args.graphdir:
         graphdicts = load_graphdicts(args.graphdir)
     else:
-        check_aws_login()
         run_terravision(args.terraform_root, args.workdir, args.jobs)
         graphdicts = load_graphdicts(args.workdir)
     if not graphdicts:
