@@ -31,7 +31,7 @@ If the config is absent (e.g. running off-box), labels fall back to the bare
 account number.
 
 Git auth (terravision clones git-sourced modules, e.g. from a private GitLab):
-put GIT_USERNAME, GIT_TOKEN, and GIT_HOST in a .env file (cwd or beside this
+put GIT_USERNAME (or GIT_USER), GIT_TOKEN, and GIT_HOST in a .env file (cwd or beside this
 script; stdlib loader, no python-dotenv).  Creds are injected with no credential
 helper and no files via Git's own GIT_CONFIG_* env vars (needs Git >= 2.31).
 
@@ -94,7 +94,8 @@ def load_dotenv(path=None):
 
 def configure_git_auth():
     """
-    Authenticate terravision's git module clones with GIT_USERNAME + GIT_TOKEN,
+    Authenticate terravision's git module clones with GIT_USERNAME (or GIT_USER)
+    + GIT_TOKEN,
     no credential helper and no files: inject `url.https://<creds>@<host>/.insteadOf
     https://<host>/` via Git's own GIT_CONFIG_* env vars (Git >= 2.31).  Host
     comes from GIT_HOST (required when GIT_TOKEN is set; no default).  No-op if
@@ -104,7 +105,7 @@ def configure_git_auth():
     token = os.environ.get("GIT_TOKEN")
     if not token:
         return
-    user = os.environ.get("GIT_USERNAME", "")
+    user = os.environ.get("GIT_USERNAME") or os.environ.get("GIT_USER") or ""
     host = os.environ.get("GIT_HOST")
     if not host:
         sys.exit("GIT_TOKEN is set but GIT_HOST is not. Set GIT_HOST (your git "
