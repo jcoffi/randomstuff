@@ -31,9 +31,9 @@ If the config is absent (e.g. running off-box), labels fall back to the bare
 account number.
 
 Git auth (terravision clones git-sourced modules, e.g. from a private GitLab):
-put GIT_USERNAME, GIT_TOKEN, and GIT_HOST in a .env file (cwd or beside this
-script; stdlib loader, no python-dotenv).  Creds are injected with no credential
-helper and no files via Git's own GIT_CONFIG_* env vars (needs Git >= 2.31).
+put GIT_USERNAME (or GIT_USER), GIT_TOKEN, and GIT_HOST in a .env file (loaded via
+python-dotenv).  Creds are injected with no credential helper and no files via
+Git's own GIT_CONFIG_* env vars (needs Git >= 2.31).
 
 Run:
     python3 build_org_diagram.py \
@@ -49,52 +49,16 @@ Skip cross-account state layer:
 """
 import argparse, concurrent.futures, json, os, re, subprocess, sys, glob
 from collections import defaultdict
+from dotenv import load_dotenv, find_dotenv
 
 
 # ----------------------------------------------------------------------------
 # 0. environment: load .env, wire git auth from GIT_USERNAME / GIT_TOKEN
 # ----------------------------------------------------------------------------
-def _apply_env_file(p):
-    with open(p) as fh:
-        for raw in fh:
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[len("export "):].lstrip()
-            key, sep, val = line.partition("=")
-            if not sep:
-                continue
-            key, val = key.strip(), val.strip()
-            if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
-                val = val[1:-1]
-            if key and key not in os.environ:   # real env wins
-                os.environ[key] = val
-
-def load_dotenv(path=None):
-    """
-    Minimal .env loader (stdlib only).  If `path` is given, load it; otherwise try
-    ./.env then the .env beside this script.  KEY=VALUE per line; '#' comments and
-    blanks ignored; optional 'export '; surrounding quotes stripped; existing
-    environment variables are NOT overridden.  Prints which file(s) it loaded.
-    """
-    here = os.path.dirname(os.path.abspath(__file__))
-    cands = [path] if path else [".env", os.path.join(here, ".env")]
-    seen, loaded = set(), []
-    for cand in cands:
-        p = os.path.abspath(os.path.expanduser(cand))
-        if p in seen or not os.path.exists(p):
-            continue
-        seen.add(p)
-        _apply_env_file(p)
-        loaded.append(p)
-    print("[env] loaded " + ", ".join(loaded) if loaded
-          else "[env] no .env found (looked in cwd and script dir)", file=sys.stderr)
-
-
 def configure_git_auth():
     """
-    Authenticate terravision's git module clones with GIT_USERNAME + GIT_TOKEN,
+    Authenticate terravision's git module clones with GIT_USERNAME (or GIT_USER)
+    + GIT_TOKEN,
     no credential helper and no files: inject `url.https://<creds>@<host>/.insteadOf
     https://<host>/` via Git's own GIT_CONFIG_* env vars (Git >= 2.31).  Host
     comes from GIT_HOST (required when GIT_TOKEN is set; no default).  No-op if
@@ -104,7 +68,7 @@ def configure_git_auth():
     token = os.environ.get("GIT_TOKEN")
     if not token:
         return
-    user = os.environ.get("GIT_USERNAME", "")
+    user = os.environ.get("GIT_USERNAME") or os.environ.get("GIT_USER") or ""
     host = os.environ.get("GIT_HOST")
     if not host:
         sys.exit("GIT_TOKEN is set but GIT_HOST is not. Set GIT_HOST (your git "
@@ -120,9 +84,14 @@ def configure_git_auth():
           file=sys.stderr)
 
 
-# Configure git auth from .env at load time so everything that shells out to git
-# inherits it -- terravision's module clones AND terraform init when run directly.
-load_dotenv()
+# Load .env and configure git auth at load time so everything that shells out to
+# git inherits it -- terravision's module clones AND terraform init when run direct.
+_dotenv = find_dotenv(usecwd=True)
+if _dotenv:
+    load_dotenv(_dotenv)   # override=False: real environment variables still win
+    print(f"[env] loaded {_dotenv}", file=sys.stderr)
+else:
+    print("[env] no .env found", file=sys.stderr)
 configure_git_auth()
 
 
