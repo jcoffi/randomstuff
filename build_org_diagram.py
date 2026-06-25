@@ -120,6 +120,12 @@ def configure_git_auth():
           file=sys.stderr)
 
 
+# Configure git auth from .env at load time so everything that shells out to git
+# inherits it -- terravision's module clones AND terraform init when run directly.
+load_dotenv()
+configure_git_auth()
+
+
 # ----------------------------------------------------------------------------
 # 1. terravision: run graphdata per repo
 # ----------------------------------------------------------------------------
@@ -555,9 +561,6 @@ def main():
     ap.add_argument("--no-state", action="store_true", help="skip cross-account edge layer")
     ap.add_argument("--out", default="org.vdx")
     args = ap.parse_args()
-
-    load_dotenv()          # GIT_USERNAME / GIT_TOKEN / GIT_HOST
-    configure_git_auth()   # wire creds into git for module clones
 
     repo_map = derive_repo_accounts(args.terraform_root, args.tfstates_root)
     print(f"repos resolved to accounts: {len(repo_map)}", file=sys.stderr)
