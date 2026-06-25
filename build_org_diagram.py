@@ -47,7 +47,7 @@ Skip the terravision step (already have per-repo jsons in a dir):
 Skip cross-account state layer:
     add --no-state
 """
-import argparse, concurrent.futures, json, os, re, subprocess, sys, glob
+import argparse, concurrent.futures, json, os, re, shutil, subprocess, sys, tempfile, glob
 from collections import defaultdict
 from dotenv import load_dotenv, find_dotenv
 
@@ -104,6 +104,11 @@ def run_terravision(terraform_root, workdir, jobs=4):
     `jobs` at a time, and return {repo: json_path}.  Each repo runs its own
     `terraform init/plan` (slow, mostly I/O-bound), so they overlap.  Output is
     inherited, not captured, so concurrent runs interleave on the terminal.
+
+    Each job gets its own TMPDIR: terravision (v0.43.0) writes a FIXED
+    /tmp/tfplan.bin (it does os.path.dirname on its unique temp dir), which would
+    collide under -j>1.  That path derives from tempfile.gettempdir(), so a
+    per-job TMPDIR makes it unique and parallel runs safe.
     """
     # Share downloaded providers across terravision's per-repo temp TF_DATA_DIRs
     # so terraform stops re-downloading the (large) AWS provider every run.
@@ -117,14 +122,19 @@ def run_terravision(terraform_root, workdir, jobs=4):
     def _one(repo):
         name = os.path.basename(repo.rstrip("/"))
         dst = os.path.join(workdir, f"{name}.json")
+        jobtmp = tempfile.mkdtemp(prefix="tv-")      # isolate terravision's fixed
+        env = {**os.environ, "TMPDIR": jobtmp}        # /tmp/tfplan.bin per job
         print(f"[terravision] {name}: starting", file=sys.stderr, flush=True)
         try:
             rc = subprocess.run(["terravision", "graphdata",
-                                 "--source", repo, "--outfile", dst]).returncode
+                                 "--source", repo, "--outfile", dst],
+                                env=env).returncode
         except OSError as e:
             print(f"[terravision] {name}: could not launch terravision ({e})",
                   file=sys.stderr, flush=True)
             return name, dst, False
+        finally:
+            shutil.rmtree(jobtmp, ignore_errors=True)
         ok = rc == 0 and os.path.exists(dst)
         print(f"[terravision] {name}: {'done' if ok else f'FAILED (exit {rc})'}",
               file=sys.stderr, flush=True)
