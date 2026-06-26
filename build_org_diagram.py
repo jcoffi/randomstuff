@@ -98,10 +98,12 @@ configure_git_auth()
 # ----------------------------------------------------------------------------
 # 1. terravision: run graphdata per repo
 # ----------------------------------------------------------------------------
-def run_terravision(terraform_root, workdir, jobs=4):
+def run_terravision(terraform_root, workdir, jobs=4, force=False):
     """
     Run `terravision graphdata` for each repo under ~/terraform/<repo>, up to
-    `jobs` at a time, and return {repo: json_path}.  Each repo runs its own
+    `jobs` at a time, and return {repo: json_path}.  A repo whose
+    <workdir>/<repo>.json already exists is skipped and reused unless force=True,
+    so re-runs only process repos not done yet.  Each repo runs its own
     `terraform init/plan` (slow, mostly I/O-bound), so they overlap.  Output is
     inherited, not captured, so concurrent runs interleave on the terminal.
 
@@ -122,6 +124,10 @@ def run_terravision(terraform_root, workdir, jobs=4):
     def _one(repo):
         name = os.path.basename(repo.rstrip("/"))
         dst = os.path.join(workdir, f"{name}.json")
+        if not force and os.path.exists(dst) and os.path.getsize(dst) > 0:
+            print(f"[terravision] {name}: cached (skip; --force to re-run)",
+                  file=sys.stderr, flush=True)
+            return name, dst, True
         jobtmp = tempfile.mkdtemp(prefix="tv-")      # isolate terravision's fixed
         env = {**os.environ, "TMPDIR": jobtmp}        # /tmp/tfplan.bin per job
         print(f"[terravision] {name}: starting", file=sys.stderr, flush=True)
@@ -537,6 +543,9 @@ def main():
     ap.add_argument("--workdir", default="./_graphdata")
     ap.add_argument("-j", "--jobs", type=int, default=1, metavar="N",
                     help="parallel terravision runs (default: 1 = serial)")
+    ap.add_argument("--force", action="store_true",
+                    help="re-run terravision even if a repo's JSON already exists "
+                         "(default: skip already-processed repos)")
     ap.add_argument("--no-state", action="store_true", help="skip cross-account edge layer")
     ap.add_argument("--out", default="org.vdx")
     args = ap.parse_args()
@@ -547,7 +556,7 @@ def main():
     if args.graphdir:
         graphdicts = load_graphdicts(args.graphdir)
     else:
-        run_terravision(args.terraform_root, args.workdir, args.jobs)
+        run_terravision(args.terraform_root, args.workdir, args.jobs, args.force)
         graphdicts = load_graphdicts(args.workdir)
     if not graphdicts:
         sys.exit("No graphdicts produced. Check terravision ran and emitted json.")
