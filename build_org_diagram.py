@@ -111,6 +111,10 @@ def run_terravision(terraform_root, workdir, jobs=4, force=False):
     /tmp/tfplan.bin (it does os.path.dirname on its unique temp dir), which would
     collide under -j>1.  That path derives from tempfile.gettempdir(), so a
     per-job TMPDIR makes it unique and parallel runs safe.
+
+    With jobs>1 the first repo runs serially first to pre-warm terravision's
+    unlocked module cache (~/.terravision/module_cache) before fanning out, so
+    repos sharing a module don't race on the first cold clone.
     """
     # Share downloaded providers across terravision's per-repo temp TF_DATA_DIRs
     # so terraform stops re-downloading the (large) AWS provider every run.
@@ -147,9 +151,18 @@ def run_terravision(terraform_root, workdir, jobs=4, force=False):
         return name, dst, ok
 
     out = {}
+    repos = sorted(repos)
+    # terravision's module cache (~/.terravision/module_cache) has no locking, so
+    # a cold parallel run can race when repos share a module.  Pre-warm by running
+    # the first repo serially to populate common modules, then fan out the rest.
+    if jobs > 1 and len(repos) > 1:
+        name, dst, ok = _one(repos[0])
+        if ok:
+            out[name] = dst
+        repos = repos[1:]
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
         for fut in concurrent.futures.as_completed(
-                ex.submit(_one, r) for r in sorted(repos)):
+                ex.submit(_one, r) for r in repos):
             name, dst, ok = fut.result()
             if ok:
                 out[name] = dst
