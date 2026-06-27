@@ -136,17 +136,27 @@ def run_terravision(terraform_root, workdir, jobs=4, force=False):
         env = {**os.environ, "TMPDIR": jobtmp}        # /tmp/tfplan.bin per job
         print(f"[terravision] {name}: starting", file=sys.stderr, flush=True)
         try:
-            rc = subprocess.run(["terravision", "graphdata",
-                                 "--source", repo, "--outfile", dst],
-                                env=env).returncode
+            # merge terravision's stdout+stderr and re-emit line-by-line on OUR
+            # stderr, prefixed per repo, so its preflight/parse output and any
+            # errors (e.g. module clone failures) are always visible and live.
+            proc = subprocess.Popen(
+                ["terravision", "graphdata", "--source", repo, "--outfile", dst],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1)
         except OSError as e:
+            shutil.rmtree(jobtmp, ignore_errors=True)
             print(f"[terravision] {name}: could not launch terravision ({e})",
                   file=sys.stderr, flush=True)
             return name, dst, False
-        finally:
-            shutil.rmtree(jobtmp, ignore_errors=True)
+        for line in proc.stdout:
+            sys.stderr.write(f"  [{name}] {line}")
+            sys.stderr.flush()
+        proc.wait()
+        shutil.rmtree(jobtmp, ignore_errors=True)
+        rc = proc.returncode
         ok = rc == 0 and os.path.exists(dst)
-        print(f"[terravision] {name}: {'done' if ok else f'FAILED (exit {rc})'}",
+        print(f"[terravision] {name}: "
+              f"{'done' if ok else f'FAILED (exit {rc}) -- see output above'}",
               file=sys.stderr, flush=True)
         return name, dst, ok
 
