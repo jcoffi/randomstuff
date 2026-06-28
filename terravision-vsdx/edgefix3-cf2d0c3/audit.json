@@ -1,0 +1,50 @@
+[
+  {
+    "begin_rows": 1,
+    "boxes": 3,
+    "connect_rows": 2,
+    "connectors": 1,
+    "end_rows": 1,
+    "errors": [],
+    "labels": 14,
+    "ok": true,
+    "path": "/tmp/opencode/edgefix3/aws.vsdx",
+    "top_shapes": 4
+  },
+  {
+    "begin_rows": 2,
+    "boxes": 4,
+    "connect_rows": 4,
+    "connectors": 2,
+    "end_rows": 2,
+    "errors": [],
+    "labels": 6,
+    "ok": true,
+    "path": "/tmp/opencode/edgefix3/azure.vsdx",
+    "top_shapes": 6
+  },
+  {
+    "begin_rows": 10,
+    "boxes": 4,
+    "connect_rows": 20,
+    "connectors": 10,
+    "end_rows": 10,
+    "errors": [],
+    "labels": 19,
+    "ok": true,
+    "path": "/tmp/opencode/edgefix3/gcp.vsdx",
+    "top_shapes": 14
+  },
+  {
+    "begin_rows": 91,
+    "boxes": 3,
+    "connect_rows": 182,
+    "connectors": 91,
+    "end_rows": 91,
+    "errors": [],
+    "labels": 14,
+    "ok": true,
+    "path": "/tmp/opencode/edgefix3/stress-complete-aws.vsdx",
+    "top_shapes": 94
+  }
+]
