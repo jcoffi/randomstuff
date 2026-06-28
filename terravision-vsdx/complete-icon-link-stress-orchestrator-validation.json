@@ -1,0 +1,19 @@
+{
+  "connect_rows": 182,
+  "connector_shapes_master_2": 91,
+  "expected_complete_graph_connectors": 91,
+  "foreign_data_rels": 14,
+  "media_parts": 8,
+  "sample": "/tmp/opencode/complete-icon-link-stress.vsdx",
+  "unique_connected_wrapper_pairs": 91,
+  "wrapper_icon_groups": 14,
+  "wrapper_sample_names": [
+    "module.bastion-host.aws_instance.bastion_host.group",
+    "module.ec2-instance.aws_iam_role.ec2_iam_role.group",
+    "module.ec2-instance.aws_iam_role_policy_attachment.attach_ssm_policy.group",
+    "module.ec2-instance.aws_instance.ec2_instance.group",
+    "module.private-vpc.aws_eip.nat_eip.group"
+  ],
+  "xml_parts_parsed": 15,
+  "zip_crc": "ok"
+}
