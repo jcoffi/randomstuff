@@ -1,0 +1,38 @@
+{
+  "aws": {
+    "clusters": 3,
+    "complete_icon_nodes": 0,
+    "edges": 1,
+    "fixture": "tests/json/bastion-tfdata.json",
+    "nodes": 16,
+    "provider": "aws",
+    "vsdx": "/tmp/opencode/imageedge4/aws.vsdx"
+  },
+  "azure": {
+    "clusters": 4,
+    "complete_icon_nodes": 0,
+    "edges": 2,
+    "fixture": "tests/json/azure-aks-tfdata.json",
+    "nodes": 12,
+    "provider": "azure",
+    "vsdx": "/tmp/opencode/imageedge4/azure.vsdx"
+  },
+  "gcp": {
+    "clusters": 4,
+    "complete_icon_nodes": 0,
+    "edges": 10,
+    "fixture": "tests/json/gcp-three-tier-webapp-tfdata.json",
+    "nodes": 21,
+    "provider": "gcp",
+    "vsdx": "/tmp/opencode/imageedge4/gcp.vsdx"
+  },
+  "stress": {
+    "clusters": 3,
+    "complete_icon_nodes": 14,
+    "edges": 91,
+    "fixture": "tests/json/bastion-tfdata.json",
+    "nodes": 16,
+    "provider": "aws",
+    "vsdx": "/tmp/opencode/imageedge4/stress-complete-aws.vsdx"
+  }
+}
