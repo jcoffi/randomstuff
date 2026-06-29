@@ -1,0 +1,54 @@
+{
+  "aws": {
+    "connect_rows": 2,
+    "connector_count": 1,
+    "errors": [],
+    "file": "/tmp/opencode/imageedge4/aws.vsdx",
+    "foreign_count": 14,
+    "group_count": 17,
+    "ok": true,
+    "shape_count": 49,
+    "target_type_counts": {
+      "foreign": 2
+    }
+  },
+  "azure": {
+    "connect_rows": 4,
+    "connector_count": 2,
+    "errors": [],
+    "file": "/tmp/opencode/imageedge4/azure.vsdx",
+    "foreign_count": 6,
+    "group_count": 10,
+    "ok": true,
+    "shape_count": 28,
+    "target_type_counts": {
+      "foreign": 3
+    }
+  },
+  "gcp": {
+    "connect_rows": 20,
+    "connector_count": 10,
+    "errors": [],
+    "file": "/tmp/opencode/imageedge4/gcp.vsdx",
+    "foreign_count": 19,
+    "group_count": 23,
+    "ok": true,
+    "shape_count": 75,
+    "target_type_counts": {
+      "foreign": 14
+    }
+  },
+  "stress-complete-aws": {
+    "connect_rows": 182,
+    "connector_count": 91,
+    "errors": [],
+    "file": "/tmp/opencode/imageedge4/stress-complete-aws.vsdx",
+    "foreign_count": 14,
+    "group_count": 17,
+    "ok": true,
+    "shape_count": 139,
+    "target_type_counts": {
+      "foreign": 14
+    }
+  }
+}
